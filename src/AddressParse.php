@@ -8,15 +8,17 @@
 
 namespace AddressParse;
 
+use GuzzleHttp\Client;
+
 class AddressParse
 {
-    public static function getDetail($address)
+    public static function getDetail($address, $gd_key = '')
     {
         //解析用户信息
         $userDetail = self::_getUserDetail($address);
 
         //解析地址详情
-        $addressDetail = self::_getAddressDetail($userDetail['address']);
+        $addressDetail = self::_getAddressDetail($userDetail['address'], $gd_key);
 
         return array_merge($userDetail, $addressDetail);
     }
@@ -83,15 +85,22 @@ class AddressParse
         return $detail;
     }
 
-    protected static function _getAddressDetail($address)
+    protected static function _getAddressDetail($address, $gd_key = '')
     {
+
+        $detail            = [
+            'province'          => ['code' => '', 'name' => ''],
+            'city'              => ['code' => '', 'name' => ''],
+            'district'          => ['code' => '', 'name' => ''],
+            'formatted_address' => '',
+        ];
+        $address           = preg_replace('/-|_/', '', $address);
+        $formatted_address = preg_replace('/^(\D+?)(市)/', '', $address);
+        $formatted_address = preg_replace('/^(\D+?)(区|县|旗)/', '', $formatted_address);
+
+
         //1. 过滤干扰字段
-        $address = preg_replace(
-            '/-|_/',
-            '',
-            $address
-        );
-        $area    = include 'area.php';
+        $area = include 'area.php';
 
         //匹配 三级地址 这里将【县，区，旗，市】去掉,都江堰市->都江堰
         $arr = [];
@@ -137,19 +146,7 @@ class AddressParse
         //基本走到这里 过滤的差不多了 只剩一个了  目前没发现多个 如果有 后续修改
         if ($arr) {
             //如果还有多个(情感上是不存在的) 就返回第一个把.....
-            $arr = current($arr);
-
-            //截取出详细地址  **市 -> **
-            $district          = mb_substr($arr[2], 7);
-            $formatted_address = mb_strrchr($address, $district);
-            //如果没有找到 取消【县，区，旗，市】 再查询一次
-            if (!$formatted_address) {
-                $district          = mb_substr(mb_substr($arr[2], 0, -1), 7);
-                $formatted_address = mb_strrchr($address, $district);
-            }
-            $formatted_address = mb_substr($formatted_address, mb_strlen($district));
-            $formatted_address = preg_replace('/^(县|区|旗|市){1}/', '', $formatted_address);
-
+            $arr    = current($arr);
             $detail = [
                 'province'          => [
                     'code' => mb_substr($arr[0], 0, 6),
@@ -165,15 +162,43 @@ class AddressParse
                 ],
                 'formatted_address' => trim($formatted_address),
             ];
-        } else {
-            $detail = [
-                'province'          => ['code' => '', 'name' => ''],
-                'city'              => ['code' => '', 'name' => ''],
-                'district'          => ['code' => '', 'name' => ''],
-                'formatted_address' => '',
-            ];
-
         }
+
+
+        //使用高德地图进一步分析
+        if ($gd_key) {
+            $url      = "https://restapi.amap.com/v3/geocode/geo?key={$gd_key}&s=rsv3&batch=true&address={$address}";
+            $client   = new Client();
+            $response = $client->get($url, ['http_errors' => false]);
+            $code     = $response->getStatusCode();
+
+            if ($code == 200) {
+                $body = json_decode($response->getBody()->getContents(), true);
+                if (isset($body['geocodes'][0])) {
+                    $body = $body['geocodes'][0];
+                    if ($detail['province']['code'] == mb_substr($body['adcode'], 0, 2) . '0000') {
+                        $detail['formatted_address'] = $formatted_address ?: $body['formatted_address'];
+                    } else {
+                        $detail = [
+                            'province'          => [
+                                'code' => mb_substr($body['adcode'], 0, 2) . '0000',
+                                'name' => $body['province'] ?: ''
+                            ],
+                            'city'              => [
+                                'code' => $body['city'] ? mb_substr($body['adcode'], 0, 4) . '00' : '',
+                                'name' => $body['city'] ?: ''
+                            ],
+                            'district'          => [
+                                'code' => $body['district'] ? $body['adcode'] : '',
+                                'name' => $body['district'] ?: ''
+                            ],
+                            'formatted_address' => $formatted_address ?: $body['formatted_address'],
+                        ];
+                    }
+                }
+            }
+        }
+
 
         return $detail;
     }
